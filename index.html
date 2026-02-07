@@ -149,22 +149,31 @@
         
         // Frequency bands (in Hz)
         const BANDS = {
-            lows: { min: 20, max: 250 },      // Bass - push from top
-            lowMids: { min: 250, max: 1000 }, // Low-mids - push from left
-            highMids: { min: 1000, max: 4000 }, // High-mids - push from right
-            highs: { min: 4000, max: 20000 }  // Highs - push from bottom
+            lows: { min: 20, max: 250 },       // Bass → breathing
+            mids: { min: 250, max: 4000 },      // Mids → color drift
+            highs: { min: 4000, max: 20000 }    // Highs → sparkle/glow
         };
         
-        // Adaptive envelope follower state per band
+        // Slow envelope followers (long release for organic feel)
         const envelopes = {
-            lows: { value: 0, lastEnergy: 0, attack: 0.05, release: 0.05 },
-            lowMids: { value: 0, lastEnergy: 0, attack: 0.05, release: 0.05 },
-            highMids: { value: 0, lastEnergy: 0, attack: 0.05, release: 0.05 },
-            highs: { value: 0, lastEnergy: 0, attack: 0.05, release: 0.05 }
+            lows: { value: 0, lastEnergy: 0 },
+            mids: { value: 0, lastEnergy: 0 },
+            highs: { value: 0, lastEnergy: 0 },
+            overall: { value: 0, lastEnergy: 0 }
         };
         
-        // Color shift based on audio
-        let colorShift = { warm: 0, cool: 0 };
+        // Trippy state — slow-moving properties
+        let trippy = {
+            breath: 0,           // 0-1, bass breathing (expansion)
+            breathTarget: 0,
+            hueRotation: 0,      // cumulative hue rotation from mids
+            sparkle: 0,          // 0-1, highs glow intensity
+            sparkleTarget: 0,
+            swirl: 0,            // current swirl angle velocity
+            swirlTarget: 0,      // target swirl from overall energy
+            connectionBoost: 0,  // extra connection distance from highs
+            connectionTarget: 0,
+        };
         
         function resize() {
             width = canvas.width = window.innerWidth;
@@ -249,21 +258,22 @@
                 }
             }
             
-            // Audio reactive forces (additive)
+            // Audio reactive: breathing + swirl (gentle, organic)
             if (audioActive && !isCalibrating) {
-                const forceMultiplier = 0.3;
+                // Breathing: bass pushes particles gently outward from center
+                const cx = width / 2;
+                const cy = height / 2;
+                const bx = p.baseX - cx;
+                const by = p.baseY - cy;
+                const bDist = Math.sqrt(bx * bx + by * by) || 1;
+                const breathForce = trippy.breath * 0.15;
+                p.vx += (bx / bDist) * breathForce;
+                p.vy += (by / bDist) * breathForce;
                 
-                // Lows push from top downward
-                p.vy += envelopes.lows.value * forceMultiplier;
-                
-                // Low-mids push from left rightward
-                p.vx += envelopes.lowMids.value * forceMultiplier;
-                
-                // High-mids push from right leftward
-                p.vx -= envelopes.highMids.value * forceMultiplier;
-                
-                // Highs push from bottom upward
-                p.vy -= envelopes.highs.value * forceMultiplier;
+                // Swirl: overall energy creates slow rotation
+                const swirlForce = trippy.swirl * 0.02;
+                p.vx += (-by / bDist) * swirlForce;
+                p.vy += (bx / bDist) * swirlForce;
             }
             
             // Apply velocity with damping
@@ -276,55 +286,86 @@
             p.pulse += p.pulseSpeed;
         }
         
+        function hslToRgb(h, s, l) {
+            h = ((h % 360) + 360) % 360;
+            s /= 100; l /= 100;
+            const c = (1 - Math.abs(2 * l - 1)) * s;
+            const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+            const m = l - c / 2;
+            let r, g, b;
+            if (h < 60) { r = c; g = x; b = 0; }
+            else if (h < 120) { r = x; g = c; b = 0; }
+            else if (h < 180) { r = 0; g = c; b = x; }
+            else if (h < 240) { r = 0; g = x; b = c; }
+            else if (h < 300) { r = x; g = 0; b = c; }
+            else { r = c; g = 0; b = x; }
+            return { r: Math.round((r + m) * 255), g: Math.round((g + m) * 255), b: Math.round((b + m) * 255) };
+        }
+        
+        function rgbToHsl(r, g, b) {
+            r /= 255; g /= 255; b /= 255;
+            const max = Math.max(r, g, b), min = Math.min(r, g, b);
+            let h, s, l = (max + min) / 2;
+            if (max === min) { h = s = 0; }
+            else {
+                const d = max - min;
+                s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+                if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) * 60;
+                else if (max === g) h = ((b - r) / d + 2) * 60;
+                else h = ((r - g) / d + 4) * 60;
+            }
+            return { h, s: s * 100, l: l * 100 };
+        }
+        
         function drawParticle(p) {
             const pulseAlpha = p.alpha * (0.7 + 0.3 * Math.sin(p.pulse));
-            const pulseRadius = p.radius * (0.8 + 0.2 * Math.sin(p.pulse));
+            let pulseRadius = p.radius * (0.8 + 0.2 * Math.sin(p.pulse));
             
-            // Apply subtle color shift based on audio (10-15% influence)
             let r = p.color.r;
             let g = p.color.g;
             let b = p.color.b;
+            let glowMultiplier = 4;
             
             if (audioActive && !isCalibrating) {
-                const influence = 0.12;
-                // Warm shift (amber/gold) from lows
-                r += (255 - r) * colorShift.warm * influence;
-                g += (180 - g) * colorShift.warm * influence * 0.7;
-                b -= b * colorShift.warm * influence * 0.5;
+                // Hue rotation from mids (slow color drift)
+                const hsl = rgbToHsl(r, g, b);
+                hsl.h += trippy.hueRotation;
+                const shifted = hslToRgb(hsl.h, hsl.s, hsl.l);
+                r = shifted.r;
+                g = shifted.g;
+                b = shifted.b;
                 
-                // Cool shift (cyan/blue) from highs
-                r -= r * colorShift.cool * influence * 0.5;
-                g += (220 - g) * colorShift.cool * influence * 0.8;
-                b += (255 - b) * colorShift.cool * influence;
-                
-                r = Math.max(0, Math.min(255, r));
-                g = Math.max(0, Math.min(255, g));
-                b = Math.max(0, Math.min(255, b));
+                // Sparkle from highs: bigger glow, brighter core
+                glowMultiplier = 4 + trippy.sparkle * 3;
+                pulseRadius *= (1 + trippy.sparkle * 0.5);
             }
             
             // Glow
             const gradient = ctx.createRadialGradient(
                 p.x, p.y, 0,
-                p.x, p.y, pulseRadius * 4
+                p.x, p.y, pulseRadius * glowMultiplier
             );
-            gradient.addColorStop(0, `rgba(${r}, ${g}, ${b}, ${pulseAlpha})`);
-            gradient.addColorStop(0.4, `rgba(${r}, ${g}, ${b}, ${pulseAlpha * 0.3})`);
+            const glowAlpha = pulseAlpha * (1 + (audioActive ? trippy.sparkle * 0.5 : 0));
+            gradient.addColorStop(0, `rgba(${r}, ${g}, ${b}, ${Math.min(1, glowAlpha)})`);
+            gradient.addColorStop(0.4, `rgba(${r}, ${g}, ${b}, ${glowAlpha * 0.3})`);
             gradient.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
             
             ctx.beginPath();
-            ctx.arc(p.x, p.y, pulseRadius * 4, 0, Math.PI * 2);
+            ctx.arc(p.x, p.y, pulseRadius * glowMultiplier, 0, Math.PI * 2);
             ctx.fillStyle = gradient;
             ctx.fill();
             
-            // Core
+            // Core — brighter with sparkle
+            const coreAlpha = Math.min(1, pulseAlpha * (0.8 + (audioActive ? trippy.sparkle * 0.4 : 0)));
             ctx.beginPath();
             ctx.arc(p.x, p.y, pulseRadius, 0, Math.PI * 2);
-            ctx.fillStyle = `rgba(255, 255, 255, ${pulseAlpha * 0.8})`;
+            ctx.fillStyle = `rgba(255, 255, 255, ${coreAlpha})`;
             ctx.fill();
         }
         
         function drawConnections() {
-            const connectionDist = 80;
+            const baseConnectionDist = 80;
+            const connectionDist = baseConnectionDist + (audioActive ? trippy.connectionBoost : 0);
             
             for (let i = 0; i < particles.length; i++) {
                 for (let j = i + 1; j < particles.length; j++) {
@@ -336,9 +377,19 @@
                     
                     if (dist < connectionDist) {
                         const alpha = (1 - dist / connectionDist) * 0.15;
-                        const r = (p1.color.r + p2.color.r) / 2;
-                        const g = (p1.color.g + p2.color.g) / 2;
-                        const b = (p1.color.b + p2.color.b) / 2;
+                        let r = (p1.color.r + p2.color.r) / 2;
+                        let g = (p1.color.g + p2.color.g) / 2;
+                        let b = (p1.color.b + p2.color.b) / 2;
+                        
+                        // Apply hue rotation to connections too
+                        if (audioActive && !isCalibrating) {
+                            const hsl = rgbToHsl(r, g, b);
+                            hsl.h += trippy.hueRotation;
+                            const shifted = hslToRgb(hsl.h, hsl.s, hsl.l);
+                            r = shifted.r;
+                            g = shifted.g;
+                            b = shifted.b;
+                        }
                         
                         ctx.beginPath();
                         ctx.moveTo(p1.x, p1.y);
@@ -413,36 +464,13 @@
             return count > 0 ? sum / count : 0;
         }
         
-        function updateEnvelope(envelope, currentEnergy) {
-            // Calculate rate of change (derivative)
-            const delta = Math.abs(currentEnergy - envelope.lastEnergy);
-            
-            // Adaptive attack/release based on rate of change
-            // High delta (transients) = fast attack/release
-            // Low delta (sustained) = slow attack/release
-            const minAttack = 0.005;  // 5ms
-            const maxAttack = 0.1;    // 100ms
-            const minRelease = 0.05;  // 50ms
-            const maxRelease = 0.5;   // 500ms
-            
-            // Normalize delta to 0-1 range (assume max delta is ~100)
-            const normalizedDelta = Math.min(delta / 100, 1);
-            
-            // Inverse relationship: high delta = fast (low value), low delta = slow (high value)
-            envelope.attack = maxAttack - (normalizedDelta * (maxAttack - minAttack));
-            envelope.release = maxRelease - (normalizedDelta * (maxRelease - minRelease));
-            
-            // Apply envelope
+        function updateEnvelope(envelope, currentEnergy, attack, release) {
             if (currentEnergy > envelope.value) {
-                // Attack phase
-                envelope.value += (currentEnergy - envelope.value) * envelope.attack;
+                envelope.value += (currentEnergy - envelope.value) * attack;
             } else {
-                // Release phase
-                envelope.value += (currentEnergy - envelope.value) * envelope.release;
+                envelope.value += (currentEnergy - envelope.value) * release;
             }
-            
             envelope.lastEnergy = currentEnergy;
-            
             return envelope.value;
         }
         
@@ -454,33 +482,41 @@
             const fftSize = analyser.fftSize;
             
             // Get energy for each band
-            const lowsEnergy = getBandEnergy(BANDS.lows, dataArray, sampleRate, fftSize);
-            const lowMidsEnergy = getBandEnergy(BANDS.lowMids, dataArray, sampleRate, fftSize);
-            const highMidsEnergy = getBandEnergy(BANDS.highMids, dataArray, sampleRate, fftSize);
-            const highsEnergy = getBandEnergy(BANDS.highs, dataArray, sampleRate, fftSize);
+            const lowsEnergy = Math.max(0, getBandEnergy(BANDS.lows, dataArray, sampleRate, fftSize) - audioThreshold);
+            const midsEnergy = Math.max(0, getBandEnergy(BANDS.mids, dataArray, sampleRate, fftSize) - audioThreshold);
+            const highsEnergy = Math.max(0, getBandEnergy(BANDS.highs, dataArray, sampleRate, fftSize) - audioThreshold);
+            const overallEnergy = (lowsEnergy + midsEnergy + highsEnergy) / 3;
             
-            // Apply adaptive envelope follower
-            envelopes.lows.value = updateEnvelope(envelopes.lows, Math.max(0, lowsEnergy - audioThreshold));
-            envelopes.lowMids.value = updateEnvelope(envelopes.lowMids, Math.max(0, lowMidsEnergy - audioThreshold));
-            envelopes.highMids.value = updateEnvelope(envelopes.highMids, Math.max(0, highMidsEnergy - audioThreshold));
-            envelopes.highs.value = updateEnvelope(envelopes.highs, Math.max(0, highsEnergy - audioThreshold));
+            // Slow envelope followers — long attack, very long release
+            updateEnvelope(envelopes.lows, lowsEnergy, 0.08, 0.015);      // Bass: moderate attack, slow release
+            updateEnvelope(envelopes.mids, midsEnergy, 0.03, 0.008);      // Mids: slow attack, very slow release
+            updateEnvelope(envelopes.highs, highsEnergy, 0.1, 0.02);      // Highs: faster attack, slow release
+            updateEnvelope(envelopes.overall, overallEnergy, 0.05, 0.01); // Overall: moderate
             
-            // Update color shift (smooth transition)
-            const totalLows = envelopes.lows.value + envelopes.lowMids.value;
-            const totalHighs = envelopes.highMids.value + envelopes.highs.value;
-            const total = totalLows + totalHighs;
+            // Normalize to 0-1 range (assume max useful energy ~150)
+            const normLows = Math.min(1, envelopes.lows.value / 150);
+            const normMids = Math.min(1, envelopes.mids.value / 150);
+            const normHighs = Math.min(1, envelopes.highs.value / 150);
+            const normOverall = Math.min(1, envelopes.overall.value / 150);
             
-            if (total > 5) {
-                const targetWarm = totalLows / total;
-                const targetCool = totalHighs / total;
-                
-                colorShift.warm += (targetWarm - colorShift.warm) * 0.1;
-                colorShift.cool += (targetCool - colorShift.cool) * 0.1;
-            } else {
-                // Fade to neutral when quiet
-                colorShift.warm *= 0.95;
-                colorShift.cool *= 0.95;
-            }
+            // Bass → breathing (slow expansion from center)
+            trippy.breathTarget = normLows;
+            trippy.breath += (trippy.breathTarget - trippy.breath) * 0.03;
+            
+            // Mids → hue rotation (cumulative, slow drift)
+            // More mids energy = faster hue rotation
+            trippy.hueRotation += normMids * 0.8;  // ~0.8 degrees per frame at full energy
+            
+            // Highs → sparkle (glow intensity + connection range)
+            trippy.sparkleTarget = normHighs;
+            trippy.sparkle += (trippy.sparkleTarget - trippy.sparkle) * 0.04;
+            
+            trippy.connectionTarget = normHighs * 40;  // up to 40px extra connection range
+            trippy.connectionBoost += (trippy.connectionTarget - trippy.connectionBoost) * 0.03;
+            
+            // Overall energy → swirl (lazy rotation)
+            trippy.swirlTarget = normOverall;
+            trippy.swirl += (trippy.swirlTarget - trippy.swirl) * 0.02;
         }
         
         async function calibrateAudio() {
@@ -569,8 +605,12 @@
                     envelopes[key].lastEnergy = 0;
                 }
                 
-                colorShift.warm = 0;
-                colorShift.cool = 0;
+                // Reset trippy state
+                trippy.breath = 0; trippy.breathTarget = 0;
+                trippy.hueRotation = 0;
+                trippy.sparkle = 0; trippy.sparkleTarget = 0;
+                trippy.swirl = 0; trippy.swirlTarget = 0;
+                trippy.connectionBoost = 0; trippy.connectionTarget = 0;
             }
         }
         
