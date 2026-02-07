@@ -583,8 +583,14 @@
                     await calibrateAudio();
                     
                 } catch (err) {
-                    console.error('Microphone access denied:', err);
-                    showToast('microphone access denied');
+                    console.error('Microphone error:', err);
+                    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+                        showToast('mic blocked — check browser permissions 🔒');
+                    } else if (err.name === 'NotFoundError') {
+                        showToast('no microphone found 🎤');
+                    } else {
+                        showToast('mic error: ' + err.message);
+                    }
                 }
             } else {
                 // Deactivate audio
