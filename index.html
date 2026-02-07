@@ -107,7 +107,7 @@
 </head>
 <body>
     <canvas id="pond"></canvas>
-    <div class="info">move your cursor to disturb the cosmos • click to create ripples</div>
+    <div class="info">move your cursor to disturb the cosmos • click to create ripples • draw a loop to summon a black hole</div>
     
     <button class="mic-button" id="micButton">
         <svg viewBox="0 0 24 24">
@@ -175,6 +175,17 @@
             connectionTarget: 0,
         };
         
+        // Black hole system
+        let blackHoles = [];
+        let wormholes = [];
+        let drawPath = [];
+        let isDrawing = false;
+        let drawStartTime = 0;
+        const ANIMATION_TYPES = ['spaghettify', 'accretion', 'colorCascade', 'implosion'];
+        const DESTROY_DURATION = 4000;  // 4 seconds for destruction animation
+        const PERSIST_DURATION = 10000; // 10 seconds persistence after animation
+        const RESPAWN_DELAY = 3000;     // 3 seconds before wormhole respawn
+        
         function resize() {
             width = canvas.width = window.innerWidth;
             height = canvas.height = window.innerHeight;
@@ -196,6 +207,16 @@
                 pulseSpeed: Math.random() * 0.02 + 0.01,
                 driftX: (Math.random() - 0.5) * 0.3,
                 driftY: (Math.random() - 0.5) * 0.3,
+                // Black hole state
+                captured: false,
+                capturedBy: null,
+                captureTime: 0,
+                captureAngle: 0,
+                captureRadius: 0,
+                destroyed: false,
+                respawnAt: 0,
+                respawnWormhole: null,
+                trail: [],
             };
         }
         
@@ -220,7 +241,348 @@
             });
         }
         
+        // === BLACK HOLE SYSTEM ===
+        
+        function detectLoop(path) {
+            if (path.length < 20) return null;
+            const start = path[0];
+            const end = path[path.length - 1];
+            const closeDist = Math.sqrt((end.x - start.x) ** 2 + (end.y - start.y) ** 2);
+            // Forgiving: end within 100px of start, or within 15% of path bbox
+            const xs = path.map(p => p.x), ys = path.map(p => p.y);
+            const bboxSize = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+            if (closeDist > Math.max(100, bboxSize * 0.3)) return null;
+            // Calculate center and radius
+            const cx = path.reduce((s, p) => s + p.x, 0) / path.length;
+            const cy = path.reduce((s, p) => s + p.y, 0) / path.length;
+            const avgR = path.reduce((s, p) => s + Math.sqrt((p.x - cx) ** 2 + (p.y - cy) ** 2), 0) / path.length;
+            if (avgR < 30) return null; // too small
+            return { x: cx, y: cy, radius: avgR };
+        }
+        
+        function createBlackHole(cx, cy, radius) {
+            const animType = ANIMATION_TYPES[Math.floor(Math.random() * ANIMATION_TYPES.length)];
+            const now = Date.now();
+            const bh = {
+                x: cx, y: cy, radius: radius,
+                animationType: animType,
+                createdAt: now,
+                animDoneAt: now + DESTROY_DURATION,
+                expiresAt: now + DESTROY_DURATION + PERSIST_DURATION,
+                opacity: 1,
+                capturedCount: 0,
+            };
+            blackHoles.push(bh);
+            // Capture particles inside
+            for (const p of particles) {
+                if (p.captured || p.destroyed) continue;
+                const dx = p.x - cx;
+                const dy = p.y - cy;
+                if (Math.sqrt(dx * dx + dy * dy) <= radius * 1.1) {
+                    captureParticle(p, bh, now);
+                }
+            }
+            showToast(animType === 'spaghettify' ? '🌀 spaghettification' :
+                       animType === 'accretion' ? '💫 accretion disk' :
+                       animType === 'colorCascade' ? '🌈 color cascade' : '💥 implosion');
+        }
+        
+        function captureParticle(p, bh, now) {
+            p.captured = true;
+            p.capturedBy = bh;
+            p.captureTime = now;
+            const dx = p.x - bh.x;
+            const dy = p.y - bh.y;
+            p.captureAngle = Math.atan2(dy, dx);
+            p.captureRadius = Math.sqrt(dx * dx + dy * dy);
+            p.trail = [];
+            bh.capturedCount++;
+        }
+        
+        function scheduleRespawn(p) {
+            p.destroyed = true;
+            p.captured = false;
+            p.capturedBy = null;
+            const now = Date.now();
+            p.respawnAt = now + RESPAWN_DELAY;
+            // Create wormhole at random location
+            const wh = {
+                x: Math.random() * width,
+                y: Math.random() * height,
+                createdAt: now,
+                expiresAt: now + RESPAWN_DELAY + 2000, // linger 2s after spawn
+                opacity: 0,
+                spawnedParticle: false,
+            };
+            p.respawnWormhole = wh;
+            wormholes.push(wh);
+        }
+        
+        function updateCapturedParticle(p) {
+            const bh = p.capturedBy;
+            if (!bh) return;
+            const now = Date.now();
+            const elapsed = now - p.captureTime;
+            const progress = Math.min(1, elapsed / DESTROY_DURATION);
+            // Ease-in: slow start, accelerating
+            const ease = progress * progress * progress;
+            
+            switch (bh.animationType) {
+                case 'spaghettify': {
+                    // Spiral inward with stretching
+                    const r = p.captureRadius * (1 - ease);
+                    const spin = p.captureAngle + progress * Math.PI * 6; // 3 full rotations
+                    p.x = bh.x + Math.cos(spin) * r;
+                    p.y = bh.y + Math.sin(spin) * r;
+                    // Stretch toward center
+                    p.radius = p.radius * (1 + ease * 2); // elongate
+                    p.alpha = (1 - ease) * 0.8;
+                    break;
+                }
+                case 'accretion': {
+                    // Spiral with light trails
+                    const r = p.captureRadius * (1 - ease);
+                    const spin = p.captureAngle + progress * Math.PI * 8; // 4 rotations
+                    p.x = bh.x + Math.cos(spin) * r;
+                    p.y = bh.y + Math.sin(spin) * r;
+                    // Store trail points
+                    if (p.trail.length === 0 || elapsed % 2 === 0) {
+                        p.trail.push({ x: p.x, y: p.y, alpha: 0.6, r: p.color.r, g: p.color.g, b: p.color.b });
+                        if (p.trail.length > 30) p.trail.shift();
+                    }
+                    // Fade trails
+                    for (const t of p.trail) { t.alpha *= 0.97; }
+                    p.alpha = (1 - ease * ease) * 0.9;
+                    break;
+                }
+                case 'colorCascade': {
+                    // Move toward center with color shift
+                    const r = p.captureRadius * (1 - ease * 0.95);
+                    const spin = p.captureAngle + progress * Math.PI * 2;
+                    p.x = bh.x + Math.cos(spin) * r;
+                    p.y = bh.y + Math.sin(spin) * r;
+                    // Color shift: normal → violet → red → white
+                    if (progress < 0.33) {
+                        const t = progress / 0.33;
+                        p.color = { r: Math.round(180 + 75 * t), g: Math.round(100 * (1 - t)), b: 255 };
+                    } else if (progress < 0.66) {
+                        const t = (progress - 0.33) / 0.33;
+                        p.color = { r: 255, g: Math.round(50 * t), b: Math.round(255 * (1 - t)) };
+                    } else {
+                        const t = (progress - 0.66) / 0.34;
+                        p.color = { r: 255, g: Math.round(50 + 205 * t), b: Math.round(200 * t) };
+                    }
+                    p.alpha = progress > 0.9 ? (1 - progress) * 10 * 0.8 : 0.8;
+                    break;
+                }
+                case 'implosion': {
+                    // Direct acceleration toward center, shrink + brighten
+                    const r = p.captureRadius * (1 - ease);
+                    const angle = p.captureAngle; // no rotation, straight in
+                    p.x = bh.x + Math.cos(angle) * r;
+                    p.y = bh.y + Math.sin(angle) * r;
+                    p.radius = p.radius * (1 - ease * 0.8);
+                    // Brighten as approaching
+                    p.alpha = 0.3 + ease * 0.7;
+                    p.color = {
+                        r: Math.min(255, p.color.r + Math.round(ease * 100)),
+                        g: Math.min(255, p.color.g + Math.round(ease * 100)),
+                        b: Math.min(255, p.color.b + Math.round(ease * 100)),
+                    };
+                    break;
+                }
+            }
+            
+            // Destroy when animation complete
+            if (progress >= 1) {
+                scheduleRespawn(p);
+            }
+        }
+        
+        function updateBlackHoles() {
+            const now = Date.now();
+            for (let i = blackHoles.length - 1; i >= 0; i--) {
+                const bh = blackHoles[i];
+                // During persistence phase, capture drifters
+                if (now > bh.animDoneAt && now < bh.expiresAt) {
+                    for (const p of particles) {
+                        if (p.captured || p.destroyed) continue;
+                        const dx = p.x - bh.x;
+                        const dy = p.y - bh.y;
+                        if (Math.sqrt(dx * dx + dy * dy) <= bh.radius * 0.8) {
+                            captureParticle(p, bh, now);
+                        }
+                    }
+                }
+                // Fade out near expiry
+                const timeLeft = bh.expiresAt - now;
+                if (timeLeft < 2000) {
+                    bh.opacity = Math.max(0, timeLeft / 2000);
+                }
+                // Remove expired
+                if (now > bh.expiresAt) {
+                    blackHoles.splice(i, 1);
+                }
+            }
+        }
+        
+        function updateWormholes() {
+            const now = Date.now();
+            for (let i = wormholes.length - 1; i >= 0; i--) {
+                const wh = wormholes[i];
+                const age = now - wh.createdAt;
+                // Fade in
+                if (age < 1000) {
+                    wh.opacity = age / 1000;
+                } else if (now > wh.expiresAt - 1000) {
+                    wh.opacity = Math.max(0, (wh.expiresAt - now) / 1000);
+                } else {
+                    wh.opacity = 1;
+                }
+                // Remove expired
+                if (now > wh.expiresAt) {
+                    wormholes.splice(i, 1);
+                }
+            }
+        }
+        
+        function respawnParticles() {
+            const now = Date.now();
+            for (const p of particles) {
+                if (p.destroyed && now >= p.respawnAt) {
+                    const wh = p.respawnWormhole;
+                    const spawnX = wh ? wh.x + (Math.random() - 0.5) * 20 : Math.random() * width;
+                    const spawnY = wh ? wh.y + (Math.random() - 0.5) * 20 : Math.random() * height;
+                    const color = COLORS[Math.floor(Math.random() * COLORS.length)];
+                    p.x = spawnX;
+                    p.y = spawnY;
+                    p.baseX = spawnX;
+                    p.baseY = spawnY;
+                    p.vx = (Math.random() - 0.5) * 2;
+                    p.vy = (Math.random() - 0.5) * 2;
+                    p.color = color;
+                    p.alpha = 0; // fade in
+                    p.radius = Math.random() * 2 + 1;
+                    p.captured = false;
+                    p.capturedBy = null;
+                    p.destroyed = false;
+                    p.respawnAt = 0;
+                    p.respawnWormhole = null;
+                    p.trail = [];
+                    p.pulse = Math.random() * Math.PI * 2;
+                    p.driftX = (Math.random() - 0.5) * 0.3;
+                    p.driftY = (Math.random() - 0.5) * 0.3;
+                }
+                // Fade in after respawn
+                if (!p.destroyed && !p.captured && p.alpha < 0.3) {
+                    p.alpha += 0.005;
+                }
+            }
+        }
+        
+        function drawBlackHoles() {
+            const now = Date.now();
+            for (const bh of blackHoles) {
+                const age = now - bh.createdAt;
+                const op = bh.opacity;
+                
+                // Dark center
+                const darkGrad = ctx.createRadialGradient(bh.x, bh.y, 0, bh.x, bh.y, bh.radius * 0.6);
+                darkGrad.addColorStop(0, `rgba(0, 0, 0, ${0.8 * op})`);
+                darkGrad.addColorStop(0.7, `rgba(0, 0, 0, ${0.3 * op})`);
+                darkGrad.addColorStop(1, `rgba(0, 0, 0, 0)`);
+                ctx.beginPath();
+                ctx.arc(bh.x, bh.y, bh.radius * 0.6, 0, Math.PI * 2);
+                ctx.fillStyle = darkGrad;
+                ctx.fill();
+                
+                // Event horizon ring
+                const pulse = 1 + Math.sin(age * 0.003) * 0.1;
+                const ringGrad = ctx.createRadialGradient(bh.x, bh.y, bh.radius * 0.8 * pulse, bh.x, bh.y, bh.radius * 1.1 * pulse);
+                ringGrad.addColorStop(0, `rgba(100, 50, 200, 0)`);
+                ringGrad.addColorStop(0.4, `rgba(150, 80, 255, ${0.4 * op})`);
+                ringGrad.addColorStop(0.6, `rgba(200, 100, 255, ${0.3 * op})`);
+                ringGrad.addColorStop(1, `rgba(100, 50, 200, 0)`);
+                ctx.beginPath();
+                ctx.arc(bh.x, bh.y, bh.radius * 1.1 * pulse, 0, Math.PI * 2);
+                ctx.fillStyle = ringGrad;
+                ctx.fill();
+                
+                // Subtle gravitational lensing effect (distortion ring)
+                ctx.beginPath();
+                ctx.arc(bh.x, bh.y, bh.radius * pulse, 0, Math.PI * 2);
+                ctx.strokeStyle = `rgba(180, 120, 255, ${0.2 * op})`;
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+            }
+        }
+        
+        function drawWormholes() {
+            const now = Date.now();
+            for (const wh of wormholes) {
+                const age = now - wh.createdAt;
+                const op = wh.opacity;
+                if (op <= 0) continue;
+                
+                const pulse = 1 + Math.sin(age * 0.005) * 0.2;
+                const radius = 25 * pulse;
+                
+                // Bright emergence glow
+                const grad = ctx.createRadialGradient(wh.x, wh.y, 0, wh.x, wh.y, radius);
+                grad.addColorStop(0, `rgba(150, 255, 200, ${0.6 * op})`);
+                grad.addColorStop(0.3, `rgba(100, 200, 255, ${0.3 * op})`);
+                grad.addColorStop(0.6, `rgba(180, 100, 255, ${0.15 * op})`);
+                grad.addColorStop(1, `rgba(100, 50, 200, 0)`);
+                ctx.beginPath();
+                ctx.arc(wh.x, wh.y, radius, 0, Math.PI * 2);
+                ctx.fillStyle = grad;
+                ctx.fill();
+                
+                // Spinning ring
+                ctx.beginPath();
+                ctx.arc(wh.x, wh.y, radius * 0.6, 0, Math.PI * 2);
+                ctx.strokeStyle = `rgba(150, 255, 220, ${0.4 * op})`;
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+        }
+        
+        function drawParticleTrails() {
+            for (const p of particles) {
+                if (!p.captured || !p.trail || p.trail.length < 2) continue;
+                for (let i = 1; i < p.trail.length; i++) {
+                    const t = p.trail[i];
+                    const prev = p.trail[i - 1];
+                    if (t.alpha < 0.01) continue;
+                    ctx.beginPath();
+                    ctx.moveTo(prev.x, prev.y);
+                    ctx.lineTo(t.x, t.y);
+                    ctx.strokeStyle = `rgba(${t.r}, ${t.g}, ${t.b}, ${t.alpha})`;
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                }
+            }
+        }
+        
+        function drawDrawPath() {
+            if (!isDrawing || drawPath.length < 2) return;
+            ctx.beginPath();
+            ctx.moveTo(drawPath[0].x, drawPath[0].y);
+            for (let i = 1; i < drawPath.length; i++) {
+                ctx.lineTo(drawPath[i].x, drawPath[i].y);
+            }
+            ctx.strokeStyle = 'rgba(180, 120, 255, 0.5)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([5, 5]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+        
         function updateParticle(p) {
+            // Skip destroyed particles
+            if (p.destroyed) return;
+            // Captured particles use black hole animation
+            if (p.captured) { updateCapturedParticle(p); return; }
             // Gentle drift
             p.baseX += p.driftX;
             p.baseY += p.driftY;
@@ -318,6 +680,7 @@
         }
         
         function drawParticle(p) {
+            if (p.destroyed) return;
             const pulseAlpha = p.alpha * (0.7 + 0.3 * Math.sin(p.pulse));
             let pulseRadius = p.radius * (0.8 + 0.2 * Math.sin(p.pulse));
             
@@ -368,9 +731,11 @@
             const connectionDist = baseConnectionDist + (audioActive ? trippy.connectionBoost : 0);
             
             for (let i = 0; i < particles.length; i++) {
+                const p1 = particles[i];
+                if (p1.destroyed || p1.captured) continue;
                 for (let j = i + 1; j < particles.length; j++) {
-                    const p1 = particles[i];
                     const p2 = particles[j];
+                    if (p2.destroyed || p2.captured) continue;
                     const dx = p1.x - p2.x;
                     const dy = p1.y - p2.y;
                     const dist = Math.sqrt(dx * dx + dy * dy);
@@ -631,8 +996,14 @@
                 analyzeAudio();
             }
             
+            // Update black holes, wormholes, respawns
+            updateBlackHoles();
+            updateWormholes();
+            respawnParticles();
+            
             // Update and draw
             drawConnections();
+            drawParticleTrails();
             
             for (const p of particles) {
                 updateParticle(p);
@@ -641,6 +1012,11 @@
             
             updateRipples();
             drawRipples();
+            
+            // Draw black holes & wormholes on top
+            drawBlackHoles();
+            drawWormholes();
+            drawDrawPath();
             
             lastMouseX = mouseX;
             lastMouseY = mouseY;
@@ -651,23 +1027,90 @@
         // Event listeners
         window.addEventListener('resize', resize);
         
+        let mouseDownPos = null;
+        let hasDragged = false;
+        
+        canvas.addEventListener('mousedown', (e) => {
+            mouseDownPos = { x: e.clientX, y: e.clientY };
+            hasDragged = false;
+            isDrawing = false;
+            drawPath = [];
+        });
+        
         canvas.addEventListener('mousemove', (e) => {
             mouseX = e.clientX;
             mouseY = e.clientY;
+            if (mouseDownPos) {
+                const dx = e.clientX - mouseDownPos.x;
+                const dy = e.clientY - mouseDownPos.y;
+                if (Math.sqrt(dx * dx + dy * dy) > 15) {
+                    hasDragged = true;
+                    isDrawing = true;
+                }
+                if (isDrawing) {
+                    drawPath.push({ x: e.clientX, y: e.clientY });
+                }
+            }
         });
         
-        canvas.addEventListener('click', (e) => {
-            addRipple(e.clientX, e.clientY);
+        canvas.addEventListener('mouseup', (e) => {
+            if (isDrawing) {
+                const loop = detectLoop(drawPath);
+                if (loop) {
+                    createBlackHole(loop.x, loop.y, loop.radius);
+                }
+            } else if (!hasDragged) {
+                addRipple(e.clientX, e.clientY);
+            }
+            mouseDownPos = null;
+            isDrawing = false;
+            drawPath = [];
+        });
+        
+        // Touch events
+        let touchStartPos = null;
+        let touchHasDragged = false;
+        
+        canvas.addEventListener('touchstart', (e) => {
+            if (e.touches.length === 1) {
+                const t = e.touches[0];
+                touchStartPos = { x: t.clientX, y: t.clientY };
+                touchHasDragged = false;
+                isDrawing = false;
+                drawPath = [];
+            }
         });
         
         canvas.addEventListener('touchmove', (e) => {
-            e.preventDefault();
-            mouseX = e.touches[0].clientX;
-            mouseY = e.touches[0].clientY;
+            if (e.touches.length === 1 && touchStartPos) {
+                e.preventDefault();
+                const t = e.touches[0];
+                mouseX = t.clientX;
+                mouseY = t.clientY;
+                const dx = t.clientX - touchStartPos.x;
+                const dy = t.clientY - touchStartPos.y;
+                if (Math.sqrt(dx * dx + dy * dy) > 15) {
+                    touchHasDragged = true;
+                    isDrawing = true;
+                }
+                if (isDrawing) {
+                    drawPath.push({ x: t.clientX, y: t.clientY });
+                }
+            }
         });
         
-        canvas.addEventListener('touchstart', (e) => {
-            addRipple(e.touches[0].clientX, e.touches[0].clientY);
+        canvas.addEventListener('touchend', (e) => {
+            if (isDrawing) {
+                const loop = detectLoop(drawPath);
+                if (loop) {
+                    createBlackHole(loop.x, loop.y, loop.radius);
+                }
+            } else if (!touchHasDragged && touchStartPos) {
+                addRipple(touchStartPos.x, touchStartPos.y);
+            }
+            touchStartPos = null;
+            isDrawing = false;
+            drawPath = [];
         });
         
         // Mic button
