@@ -32,11 +32,92 @@
         .info.hidden {
             opacity: 0;
         }
+        .mic-button {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background: rgba(100, 200, 255, 0.15);
+            border: 2px solid rgba(100, 200, 255, 0.3);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+        }
+        .mic-button:hover {
+            background: rgba(100, 200, 255, 0.25);
+            border-color: rgba(100, 200, 255, 0.5);
+            transform: scale(1.05);
+        }
+        .mic-button.active {
+            background: rgba(100, 255, 150, 0.25);
+            border-color: rgba(100, 255, 150, 0.5);
+            box-shadow: 0 0 20px rgba(100, 255, 150, 0.3);
+        }
+        .mic-button svg {
+            width: 24px;
+            height: 24px;
+            fill: rgba(255, 255, 255, 0.7);
+        }
+        .toast {
+            position: fixed;
+            top: 30px;
+            left: 50%;
+            transform: translateX(-50%) translateY(-20px);
+            background: rgba(20, 20, 30, 0.9);
+            color: rgba(255, 255, 255, 0.9);
+            padding: 15px 25px;
+            border-radius: 10px;
+            border: 1px solid rgba(100, 200, 255, 0.3);
+            backdrop-filter: blur(10px);
+            opacity: 0;
+            transition: all 0.3s ease;
+            pointer-events: none;
+            font-size: 14px;
+            z-index: 1000;
+        }
+        .toast.show {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+        }
+        .threshold-indicator {
+            position: fixed;
+            bottom: 100px;
+            right: 30px;
+            background: rgba(20, 20, 30, 0.9);
+            color: rgba(255, 255, 255, 0.8);
+            padding: 10px 15px;
+            border-radius: 8px;
+            border: 1px solid rgba(100, 200, 255, 0.3);
+            backdrop-filter: blur(10px);
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            pointer-events: none;
+            font-size: 12px;
+            z-index: 1000;
+        }
+        .threshold-indicator.show {
+            opacity: 1;
+        }
     </style>
 </head>
 <body>
     <canvas id="pond"></canvas>
     <div class="info">move your cursor to disturb the cosmos • click to create ripples</div>
+    
+    <button class="mic-button" id="micButton">
+        <svg viewBox="0 0 24 24">
+            <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
+            <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
+        </svg>
+    </button>
+    
+    <div class="toast" id="toast"></div>
+    <div class="threshold-indicator" id="thresholdIndicator"></div>
     
     <script>
         const canvas = document.getElementById('pond');
@@ -57,6 +138,33 @@
             { r: 100, g: 255, b: 200 },  // mint
             { r: 255, g: 200, b: 100 },  // gold
         ];
+        
+        // Audio reactive variables
+        let audioContext = null;
+        let analyser = null;
+        let dataArray = null;
+        let audioActive = false;
+        let audioThreshold = 30;
+        let isCalibrating = false;
+        
+        // Frequency bands (in Hz)
+        const BANDS = {
+            lows: { min: 20, max: 250 },      // Bass - push from top
+            lowMids: { min: 250, max: 1000 }, // Low-mids - push from left
+            highMids: { min: 1000, max: 4000 }, // High-mids - push from right
+            highs: { min: 4000, max: 20000 }  // Highs - push from bottom
+        };
+        
+        // Adaptive envelope follower state per band
+        const envelopes = {
+            lows: { value: 0, lastEnergy: 0, attack: 0.05, release: 0.05 },
+            lowMids: { value: 0, lastEnergy: 0, attack: 0.05, release: 0.05 },
+            highMids: { value: 0, lastEnergy: 0, attack: 0.05, release: 0.05 },
+            highs: { value: 0, lastEnergy: 0, attack: 0.05, release: 0.05 }
+        };
+        
+        // Color shift based on audio
+        let colorShift = { warm: 0, cool: 0 };
         
         function resize() {
             width = canvas.width = window.innerWidth;
@@ -141,6 +249,23 @@
                 }
             }
             
+            // Audio reactive forces (additive)
+            if (audioActive && !isCalibrating) {
+                const forceMultiplier = 0.3;
+                
+                // Lows push from top downward
+                p.vy += envelopes.lows.value * forceMultiplier;
+                
+                // Low-mids push from left rightward
+                p.vx += envelopes.lowMids.value * forceMultiplier;
+                
+                // High-mids push from right leftward
+                p.vx -= envelopes.highMids.value * forceMultiplier;
+                
+                // Highs push from bottom upward
+                p.vy -= envelopes.highs.value * forceMultiplier;
+            }
+            
             // Apply velocity with damping
             p.x = p.baseX + p.vx;
             p.y = p.baseY + p.vy;
@@ -155,14 +280,36 @@
             const pulseAlpha = p.alpha * (0.7 + 0.3 * Math.sin(p.pulse));
             const pulseRadius = p.radius * (0.8 + 0.2 * Math.sin(p.pulse));
             
+            // Apply subtle color shift based on audio (10-15% influence)
+            let r = p.color.r;
+            let g = p.color.g;
+            let b = p.color.b;
+            
+            if (audioActive && !isCalibrating) {
+                const influence = 0.12;
+                // Warm shift (amber/gold) from lows
+                r += (255 - r) * colorShift.warm * influence;
+                g += (180 - g) * colorShift.warm * influence * 0.7;
+                b -= b * colorShift.warm * influence * 0.5;
+                
+                // Cool shift (cyan/blue) from highs
+                r -= r * colorShift.cool * influence * 0.5;
+                g += (220 - g) * colorShift.cool * influence * 0.8;
+                b += (255 - b) * colorShift.cool * influence;
+                
+                r = Math.max(0, Math.min(255, r));
+                g = Math.max(0, Math.min(255, g));
+                b = Math.max(0, Math.min(255, b));
+            }
+            
             // Glow
             const gradient = ctx.createRadialGradient(
                 p.x, p.y, 0,
                 p.x, p.y, pulseRadius * 4
             );
-            gradient.addColorStop(0, `rgba(${p.color.r}, ${p.color.g}, ${p.color.b}, ${pulseAlpha})`);
-            gradient.addColorStop(0.4, `rgba(${p.color.r}, ${p.color.g}, ${p.color.b}, ${pulseAlpha * 0.3})`);
-            gradient.addColorStop(1, `rgba(${p.color.r}, ${p.color.g}, ${p.color.b}, 0)`);
+            gradient.addColorStop(0, `rgba(${r}, ${g}, ${b}, ${pulseAlpha})`);
+            gradient.addColorStop(0.4, `rgba(${r}, ${g}, ${b}, ${pulseAlpha * 0.3})`);
+            gradient.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
             
             ctx.beginPath();
             ctx.arc(p.x, p.y, pulseRadius * 4, 0, Math.PI * 2);
@@ -226,12 +373,218 @@
             }
         }
         
+        // Audio reactive functions
+        
+        function showToast(message) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.classList.add('show');
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 2500);
+        }
+        
+        function updateThresholdIndicator(value) {
+            const indicator = document.getElementById('thresholdIndicator');
+            indicator.textContent = `Sensitivity: ${Math.round(value)}`;
+            indicator.classList.add('show');
+            
+            clearTimeout(indicator.fadeTimeout);
+            indicator.fadeTimeout = setTimeout(() => {
+                indicator.classList.remove('show');
+            }, 2000);
+        }
+        
+        function getBinIndex(frequency, sampleRate, fftSize) {
+            return Math.round(frequency / (sampleRate / fftSize));
+        }
+        
+        function getBandEnergy(band, dataArray, sampleRate, fftSize) {
+            const minBin = getBinIndex(band.min, sampleRate, fftSize);
+            const maxBin = getBinIndex(band.max, sampleRate, fftSize);
+            
+            let sum = 0;
+            let count = 0;
+            for (let i = minBin; i <= maxBin && i < dataArray.length; i++) {
+                sum += dataArray[i];
+                count++;
+            }
+            
+            return count > 0 ? sum / count : 0;
+        }
+        
+        function updateEnvelope(envelope, currentEnergy) {
+            // Calculate rate of change (derivative)
+            const delta = Math.abs(currentEnergy - envelope.lastEnergy);
+            
+            // Adaptive attack/release based on rate of change
+            // High delta (transients) = fast attack/release
+            // Low delta (sustained) = slow attack/release
+            const minAttack = 0.005;  // 5ms
+            const maxAttack = 0.1;    // 100ms
+            const minRelease = 0.05;  // 50ms
+            const maxRelease = 0.5;   // 500ms
+            
+            // Normalize delta to 0-1 range (assume max delta is ~100)
+            const normalizedDelta = Math.min(delta / 100, 1);
+            
+            // Inverse relationship: high delta = fast (low value), low delta = slow (high value)
+            envelope.attack = maxAttack - (normalizedDelta * (maxAttack - minAttack));
+            envelope.release = maxRelease - (normalizedDelta * (maxRelease - minRelease));
+            
+            // Apply envelope
+            if (currentEnergy > envelope.value) {
+                // Attack phase
+                envelope.value += (currentEnergy - envelope.value) * envelope.attack;
+            } else {
+                // Release phase
+                envelope.value += (currentEnergy - envelope.value) * envelope.release;
+            }
+            
+            envelope.lastEnergy = currentEnergy;
+            
+            return envelope.value;
+        }
+        
+        function analyzeAudio() {
+            if (!analyser || !audioActive) return;
+            
+            analyser.getByteFrequencyData(dataArray);
+            const sampleRate = audioContext.sampleRate;
+            const fftSize = analyser.fftSize;
+            
+            // Get energy for each band
+            const lowsEnergy = getBandEnergy(BANDS.lows, dataArray, sampleRate, fftSize);
+            const lowMidsEnergy = getBandEnergy(BANDS.lowMids, dataArray, sampleRate, fftSize);
+            const highMidsEnergy = getBandEnergy(BANDS.highMids, dataArray, sampleRate, fftSize);
+            const highsEnergy = getBandEnergy(BANDS.highs, dataArray, sampleRate, fftSize);
+            
+            // Apply adaptive envelope follower
+            envelopes.lows.value = updateEnvelope(envelopes.lows, Math.max(0, lowsEnergy - audioThreshold));
+            envelopes.lowMids.value = updateEnvelope(envelopes.lowMids, Math.max(0, lowMidsEnergy - audioThreshold));
+            envelopes.highMids.value = updateEnvelope(envelopes.highMids, Math.max(0, highMidsEnergy - audioThreshold));
+            envelopes.highs.value = updateEnvelope(envelopes.highs, Math.max(0, highsEnergy - audioThreshold));
+            
+            // Update color shift (smooth transition)
+            const totalLows = envelopes.lows.value + envelopes.lowMids.value;
+            const totalHighs = envelopes.highMids.value + envelopes.highs.value;
+            const total = totalLows + totalHighs;
+            
+            if (total > 5) {
+                const targetWarm = totalLows / total;
+                const targetCool = totalHighs / total;
+                
+                colorShift.warm += (targetWarm - colorShift.warm) * 0.1;
+                colorShift.cool += (targetCool - colorShift.cool) * 0.1;
+            } else {
+                // Fade to neutral when quiet
+                colorShift.warm *= 0.95;
+                colorShift.cool *= 0.95;
+            }
+        }
+        
+        async function calibrateAudio() {
+            if (!analyser) return;
+            
+            isCalibrating = true;
+            showToast('calibrating... stay quiet');
+            
+            const samples = [];
+            const sampleDuration = 2500; // 2.5 seconds
+            const sampleInterval = 50;
+            const sampleCount = sampleDuration / sampleInterval;
+            
+            for (let i = 0; i < sampleCount; i++) {
+                analyser.getByteFrequencyData(dataArray);
+                const sampleRate = audioContext.sampleRate;
+                const fftSize = analyser.fftSize;
+                
+                // Sample all bands
+                const avgEnergy = (
+                    getBandEnergy(BANDS.lows, dataArray, sampleRate, fftSize) +
+                    getBandEnergy(BANDS.lowMids, dataArray, sampleRate, fftSize) +
+                    getBandEnergy(BANDS.highMids, dataArray, sampleRate, fftSize) +
+                    getBandEnergy(BANDS.highs, dataArray, sampleRate, fftSize)
+                ) / 4;
+                
+                samples.push(avgEnergy);
+                
+                await new Promise(resolve => setTimeout(resolve, sampleInterval));
+            }
+            
+            // Set threshold slightly above average noise floor
+            const avgNoise = samples.reduce((a, b) => a + b, 0) / samples.length;
+            audioThreshold = avgNoise + 10;
+            
+            isCalibrating = false;
+            showToast('ready! 🎵');
+        }
+        
+        async function toggleAudio() {
+            const micButton = document.getElementById('micButton');
+            
+            if (!audioActive) {
+                try {
+                    // Request microphone access
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    
+                    // Create audio context and analyser
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    analyser = audioContext.createAnalyser();
+                    analyser.fftSize = 4096;
+                    analyser.smoothingTimeConstant = 0.3;
+                    
+                    const source = audioContext.createMediaStreamSource(stream);
+                    source.connect(analyser);
+                    
+                    dataArray = new Uint8Array(analyser.frequencyBinCount);
+                    
+                    // Activate audio
+                    audioActive = true;
+                    micButton.classList.add('active');
+                    
+                    // Calibrate
+                    await calibrateAudio();
+                    
+                } catch (err) {
+                    console.error('Microphone access denied:', err);
+                    showToast('microphone access denied');
+                }
+            } else {
+                // Deactivate audio
+                audioActive = false;
+                micButton.classList.remove('active');
+                
+                if (audioContext) {
+                    audioContext.close();
+                    audioContext = null;
+                }
+                
+                analyser = null;
+                dataArray = null;
+                
+                // Reset envelopes
+                for (const key in envelopes) {
+                    envelopes[key].value = 0;
+                    envelopes[key].lastEnergy = 0;
+                }
+                
+                colorShift.warm = 0;
+                colorShift.cool = 0;
+            }
+        }
+        
         function animate() {
             // Fade trail
             ctx.fillStyle = 'rgba(10, 10, 15, 0.15)';
             ctx.fillRect(0, 0, width, height);
             
             time++;
+            
+            // Analyze audio
+            if (audioActive) {
+                analyzeAudio();
+            }
             
             // Update and draw
             drawConnections();
@@ -270,6 +623,53 @@
         
         canvas.addEventListener('touchstart', (e) => {
             addRipple(e.touches[0].clientX, e.touches[0].clientY);
+        });
+        
+        // Mic button
+        document.getElementById('micButton').addEventListener('click', toggleAudio);
+        
+        // Threshold adjustment - scroll wheel
+        let adjustingThreshold = false;
+        window.addEventListener('wheel', (e) => {
+            if (!audioActive || isCalibrating) return;
+            
+            e.preventDefault();
+            adjustingThreshold = true;
+            
+            const delta = e.deltaY > 0 ? -2 : 2;
+            audioThreshold = Math.max(5, Math.min(100, audioThreshold + delta));
+            updateThresholdIndicator(audioThreshold);
+        }, { passive: false });
+        
+        // Threshold adjustment - two-finger touch drag
+        let lastTouchY = null;
+        let touchCount = 0;
+        
+        window.addEventListener('touchstart', (e) => {
+            touchCount = e.touches.length;
+            if (touchCount === 2 && audioActive && !isCalibrating) {
+                lastTouchY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                adjustingThreshold = true;
+            }
+        });
+        
+        window.addEventListener('touchmove', (e) => {
+            if (touchCount === 2 && audioActive && !isCalibrating && lastTouchY !== null) {
+                e.preventDefault();
+                
+                const currentY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                const delta = (lastTouchY - currentY) * 0.2;
+                
+                audioThreshold = Math.max(5, Math.min(100, audioThreshold + delta));
+                updateThresholdIndicator(audioThreshold);
+                
+                lastTouchY = currentY;
+            }
+        }, { passive: false });
+        
+        window.addEventListener('touchend', () => {
+            lastTouchY = null;
+            touchCount = 0;
         });
         
         // Hide info after a few seconds
