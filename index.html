@@ -538,10 +538,9 @@
                 // Sample all bands
                 const avgEnergy = (
                     getBandEnergy(BANDS.lows, dataArray, sampleRate, fftSize) +
-                    getBandEnergy(BANDS.lowMids, dataArray, sampleRate, fftSize) +
-                    getBandEnergy(BANDS.highMids, dataArray, sampleRate, fftSize) +
+                    getBandEnergy(BANDS.mids, dataArray, sampleRate, fftSize) +
                     getBandEnergy(BANDS.highs, dataArray, sampleRate, fftSize)
-                ) / 4;
+                ) / 3;
                 
                 samples.push(avgEnergy);
                 
