@@ -4,7 +4,7 @@ An interactive generative art piece built with HTML Canvas. Watch particles drif
 
 ## ✨ Features
 
-- **800 glowing particles** in cyan, purple, pink, mint, and gold
+- **Adaptive particle count** (scales with screen size for consistent trippy feel + performance)
 - **Mouse interaction** — particles flee from your cursor
 - **Click ripples** — create expanding waves that push particles around
 - **Particle connections** — nearby particles form ethereal links
